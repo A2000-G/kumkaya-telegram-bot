@@ -1,0 +1,20 @@
+{
+  "commands": [
+    {
+      "command": "start",
+      "description": "Kumkaya ürün asistanına hoş geldiniz"
+    },
+    {
+      "command": "help",
+      "description": "Kullanım rehberi"
+    },
+    {
+      "command": "urun",
+      "description": "Ürün ara: /urun <isim>"
+    },
+    {
+      "command": "kvkk",
+      "description": "KVKK metni"
+    }
+  ]
+}
