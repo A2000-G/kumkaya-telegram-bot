@@ -5,7 +5,7 @@ import httpx
 app = FastAPI()
 
 @app.get("/healthz")
-def healthz():
+def health():
     return {"status": "ok"}
 
 WEBHOOK_PATH = os.environ.get("WEBHOOK_SECRET_PATH", "telegram/wh-default")
@@ -24,7 +24,7 @@ async def telegram_webhook(req: Request):
 
     reply = None
     if text == "/start":
-        reply = "Merhaba Ayberk! Bot çalışıyor 🚀\n\nKomutlar:\n• /start\n• /ping"
+        reply = "Merhaba Ayberk! Bot çalışıyor 🚀\n\nKomutlar:\n /start\n /ping"
     elif text == "/ping":
         reply = "pong ✅"
 
@@ -35,8 +35,7 @@ async def telegram_webhook(req: Request):
                     f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                     data={"chat_id": chat_id, "text": reply},
                 )
-        except Exception:
-            # Mesaj gönderiminde hata olsa bile webhook 200 dönsün
-            pass
+        except Exception as e:
+            print("sendMessage error:", repr(e))  # <-- hata logu buraya düşecek
 
     return {"ok": True}
