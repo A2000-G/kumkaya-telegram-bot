@@ -39,3 +39,6 @@ async def telegram_webhook(req: Request):
             print("sendMessage error:", repr(e))  # <-- hata logu buraya düşecek
 
     return {"ok": True}
+@app.get("/health")
+def health():
+    return {"ok": True}
