@@ -3,46 +3,63 @@ import logging
 from fastapi import FastAPI, Request
 import httpx
 
-# Ortam değişkenlerinden token al
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# FastAPI app
 app = FastAPI()
-
-# Log ayarı
 logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger("kumkaya-bot")
 
-# Sağlık kontrol endpoint'i
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# Telegram webhook endpoint'i
-@app.post("/telegram/wh-7b3c6b9a")  # Environment'taki secret path ile aynı
+@app.get("/debug/getme")
+async def getme():
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(f"{API_URL}/getMe")
+        return r.json()
+
+async def send_message(chat_id: int, text: str):
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(f"{API_URL}/sendMessage",
+                              json={"chat_id": chat_id, "text": text})
+        try:
+            body = r.json()
+        except Exception:
+            body = {"parse_error": True, "text": await r.aread()}
+        log.debug(f"sendMessage status={r.status_code} body={body}")
+        return r.status_code, body
+
+@app.post("/telegram/wh-7b3c6b9a")
 async def telegram_webhook(request: Request):
-    data = await request.json()
-    log.info(f"UPDATE: {data}")
+    try:
+        update = await request.json()
+        log.info(f"UPDATE: {update}")
 
-    message = data.get("message")
-    if not message:
-        return {"ok": True}
+        message = update.get("message") or {}
+        if not message:
+            # callback_query vs. geldiğinde sessiz geç
+            return {"ok": True}
 
-    chat_id = message["chat"]["id"]
-    text = message.get("text", "")
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        text = (message.get("text") or "").strip()
 
-    # Komut kontrolü
-    if text.startswith("/start"):
-        reply = "Merhaba! Bot aktif ✅\nBana bir ürün adı veya komut yaz."
-    else:
-        reply = f"Aldım: {text}"
+        if not chat_id:
+            log.warning("No chat_id in update")
+            return {"ok": True}
 
-    # Telegram'a mesaj gönder
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"{API_URL}/sendMessage",
-            json={"chat_id": chat_id, "text": reply}
-        )
+        if text.startswith("/start"):
+            reply = "Merhaba! Bot aktif ✅\nBana bir ürün adı veya komut yaz."
+        else:
+            reply = f"Aldım: {text or '(boş mesaj)'}"
 
+        status, body = await send_message(chat_id, reply)
+        if status != 200 or not body.get("ok", False):
+            log.error(f"sendMessage FAILED status={status} body={body}")
+
+    except Exception as e:
+        log.exception(f"Handler error: {e}")
+        # Telegram'a 200 dönmeye devam etsin ki retry yağmasın
     return {"ok": True}
