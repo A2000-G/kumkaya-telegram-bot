@@ -63,3 +63,11 @@ async def telegram_webhook(request: Request):
         log.exception(f"Handler error: {e}")
         # Telegram'a 200 dönmeye devam etsin ki retry yağmasın
     return {"ok": True}
+@app.get("/debug/ping-n8n")
+async def ping_n8n():
+    import httpx, os
+    url = os.environ["N8N_WEBHOOK_URL"]
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.post(url, json={"message": {"text": "ping"}})
+        return {"status": r.status_code, "body": r.text}
+
