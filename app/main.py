@@ -1,102 +1,108 @@
+# app/main.py
 import os
-import logging
+import asyncio
+from typing import Any, Dict, Optional, Tuple
+
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 import httpx
 
-# ── ENV ────────────────────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]  # BotFather token (Render Environment)
-API_URL   = f"https://api.telegram.org/bot{BOT_TOKEN}"
-N8N_URL   = os.environ.get("N8N_WEBHOOK_URL", "").strip()  # n8n Webhook Production URL
+app = FastAPI(title="kumkaya-telegram-bot")
 
-# ── APP & LOG ─────────────────────────────────────────────────────────────────
-app = FastAPI()
-logging.basicConfig(level=logging.DEBUG)
-log = logging.getLogger("kumkaya-bridge")
+# ==== ENV ====
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+WEBHOOK_SECRET_PATH = os.environ.get("WEBHOOK_SECRET_PATH", "telegram/wh-test")  # örn: telegram/wh-test
+N8N_WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL")  # örn: https://<n8n-domain>/webhook/<path>
+PORT = int(os.environ.get("PORT", "8000"))
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-async def send_message(chat_id: int, text: str):
-    """Telegram'a basit text mesaj gönder."""
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(f"{API_URL}/sendMessage",
-                              json={"chat_id": chat_id, "text": text})
-        # Log için kısa özet
-        try:
-            body = r.json()
-        except Exception:
-            body = {"raw": await r.aread()}
-        log.debug(f"sendMessage status={r.status_code} body={body}")
-        return r.status_code, body
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# ── DEBUG / HEALTH ────────────────────────────────────────────────────────────
+
+# ==== HELPERS ====
+async def telegram_send_message(chat_id: int, text: str) -> Optional[Dict[str, Any]]:
+    """Telegram'a düz metin mesaj gönder."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("[WARN] TELEGRAM_BOT_TOKEN boş.")
+        return None
+    payload = {"chat_id": chat_id, "text": text}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        print(f"[sendMessage ERROR] {e}")
+        return None
+
+
+async def forward_to_n8n(data: Dict[str, Any]) -> None:
+    """Gelen update'i n8n webhook'una fire-and-forget ile gönder (opsiyonel)."""
+    if not N8N_WEBHOOK_URL:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(N8N_WEBHOOK_URL, json=data)
+    except Exception as e:
+        print(f"[forward_to_n8n ERROR] {e}")
+
+
+def extract_text_and_chat(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
+    """Update içinden text ve chat_id'yi güvenli çıkar."""
+    msg = payload.get("message") or payload.get("edited_message") or {}
+    if not msg and payload.get("callback_query"):
+        msg = payload["callback_query"].get("message", {})
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id")
+    text = msg.get("text")
+    return text, chat_id
+
+
+# ==== HEALTH ====
 @app.get("/")
-def root():
-    return {"ok": True, "service": "kumkaya-telegram-bridge"}
+async def root():
+    return {"ok": True, "service": "kumkaya-telegram-bot", "webhook_path": f"/{WEBHOOK_SECRET_PATH}"}
 
-@app.get("/health")
-def health():
-    return {"ok": True}
 
-@app.get("/debug/getme")
-async def getme():
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(f"{API_URL}/getMe")
-        return r.json()
+@app.get("/debug/ping")
+async def ping():
+    return {"pong": True}
+
 
 @app.get("/debug/ping-n8n")
 async def ping_n8n():
-    if not N8N_URL:
-        return {"error": "N8N_WEBHOOK_URL tanımlı değil"}
-    async with httpx.AsyncClient(timeout=10) as c:
-        r = await c.post(N8N_URL, json={"message": {"text": "ping"}})
-        # JSON ise json dön, değilse text
-        try:
-            body = r.json()
-        except Exception:
-            body = r.text
-        return {"status": r.status_code, "body": body}
-
-# ── TELEGRAM WEBHOOK (Telegram → Render) ──────────────────────────────────────
-# ENV'deki secret path ile birebir aynı olmalı
-@app.post("/telegram/wh-7b3c6b9a")
-async def telegram_webhook(request: Request):
+    if not N8N_WEBHOOK_URL:
+        return JSONResponse({"ok": False, "error": "N8N_WEBHOOK_URL not set"}, status_code=400)
     try:
-        update = await request.json()
-        log.info(f"UPDATE: {update}")
-
-        msg = update.get("message") or {}
-        chat_id = (msg.get("chat") or {}).get("id")
-        text = (msg.get("text") or "").strip()
-
-        if not chat_id:
-            log.warning("No chat_id in update")
-            return {"ok": True}
-
-        # 1) n8n'e ileri gönder (varsa)
-        reply_text = None
-        if N8N_URL:
-            try:
-                async with httpx.AsyncClient(timeout=20) as client:
-                    r = await client.post(N8N_URL, json=update)
-                    ct = r.headers.get("content-type", "")
-                    if ct.startswith("application/json"):
-                        data = r.json()
-                        reply_text = (data.get("reply") or data.get("text") or "").strip()
-                    else:
-                        reply_text = (r.text or "").strip()
-            except Exception as e:
-                log.exception(f"n8n forward error: {e}")
-
-        # 2) n8n cevap vermediyse basit fallback
-        if not reply_text:
-            if text.startswith("/start"):
-                reply_text = "Merhaba! Bot köprü aktif ✅\nn8n bağlıysa cevabı oradan döner. Mesajınızı aldım."
-            else:
-                reply_text = "Aldım: " + (text or "(boş mesaj)")
-
-        # 3) Telegram'a gönder
-        await send_message(chat_id, reply_text)
-
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(N8N_WEBHOOK_URL, json={"message": {"text": "ping"}})
+        return {"ok": True, "status": r.status_code, "body": r.text}
     except Exception as e:
-        log.exception(f"Handler error: {e}")
-        # 200 dönmeye devam edelim ki Telegram retry yapmasın
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+# ==== TELEGRAM WEBHOOK ====
+# GET'i de expose ediyoruz ki tarayıcıdan yoklama yaptığında 404 görmeyesin.
+@app.get(f"/{WEBHOOK_SECRET_PATH}")
+async def webhook_get():
+    return {"ok": True, "method": "GET", "note": "Use POST from Telegram"}
+
+
+@app.post(f"/{WEBHOOK_SECRET_PATH}")
+async def telegram_webhook(request: Request):
+    payload = await request.json()
+    print("[Telegram] Update:", payload)
+
+    # n8n'e asenkron forward (cevabı geciktirme)
+    asyncio.create_task(forward_to_n8n(payload))
+
+    # Basit cevaplama mantığı
+    text, chat_id = extract_text_and_chat(payload)
+    if chat_id is not None:
+        reply = "Merhaba! Bot çalışıyor ✅"
+        if text and text.strip().lower() not in ("/start", "start"):
+            reply = f"Aldım: {text}"
+        # Gönderimi arka planda yap (webhook 200'ü geciktirme)
+        asyncio.create_task(telegram_send_message(chat_id, reply))
+
+    # Telegram'a hızlı 200 dön (timeout yaşamamak için)
     return {"ok": True}
